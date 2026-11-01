@@ -1,0 +1,86 @@
+' Internal Windows backend for SystemInfoSnapshot (x64 and ARM64).
+' Memory and uptime are adapted from containers/integrations/windows/WinSystem.bui
+' (GlobalMemoryStatusEx, GetTickCount64). Imported only by SystemInfo.bui under
+' #If TargetWindows; not part of the public API.
+
+#If TargetWindows Then
+' MEMORYSTATUSEX: two DWORDs followed by seven DWORDLONGs, 64 bytes.
+Sequential Structure SystemInfoWindowsMemoryStatus
+    Size As UInt32
+    LoadPercent As UInt32
+    TotalPhysicalBytes As UInt64
+    AvailablePhysicalBytes As UInt64
+    CommitLimitBytes As UInt64
+    AvailableCommitBytes As UInt64
+    TotalVirtualBytes As UInt64
+    AvailableVirtualBytes As UInt64
+    Reserved As UInt64
+End Structure
+
+Private Declare Function NativeUptime Lib "kernel32" Alias "GetTickCount64" () As UInt64
+Private Optional Declare Function NativeMemory Lib "kernel32" Alias "GlobalMemoryStatusEx" (ByRef status As SystemInfoWindowsMemoryStatus) As Int32
+Private Optional Declare Function NativeActiveProcessors Lib "kernel32" Alias "GetActiveProcessorCount" (groupNumber As UInt16) As UInt32
+Private Optional Declare Function NativeMaximumProcessors Lib "kernel32" Alias "GetMaximumProcessorCount" (groupNumber As UInt16) As UInt32
+' RtlGetVersion reports the real version, unlike the manifest-shimmed GetVersionEx.
+Private Optional Declare Function NativeVersion Lib "ntdll" Alias "RtlGetVersion" (info As Ptr) As Int32
+Private Declare Function NativeLastError Lib "kernel32" Alias "GetLastError" () As UInt32
+
+Public Function SystemInfoWindowsReadMemory() As SystemInfoWindowsMemoryStatus
+    Dim status As SystemInfoWindowsMemoryStatus
+    status.Size = 64
+    If NativeMemory(status) = 0 Then
+        Dim code As Integer = NativeLastError()
+        Throw New RuntimeException("GlobalMemoryStatusEx failed (Win32 error " + Str(code) + ")", code)
+    End If
+    Return status
+End Function
+
+''' Milliseconds since boot, including sleep and hibernation.
+Public Function SystemInfoWindowsUptimeMilliseconds() As UInt64
+    Return NativeUptime()
+End Function
+
+''' ALL_PROCESSOR_GROUPS (0xFFFF): logical processors across all groups that are currently active.
+Public Function SystemInfoWindowsActiveProcessors() As Integer
+    Dim count As Integer = NativeActiveProcessors(65535)
+    If count < 1 Then
+        Dim code As Integer = NativeLastError()
+        Throw New RuntimeException("GetActiveProcessorCount failed (Win32 error " + Str(code) + ")", code)
+    End If
+    Return count
+End Function
+
+''' Maximum logical processors the system supports across all groups.
+Public Function SystemInfoWindowsConfiguredProcessors() As Integer
+    Dim count As Integer = NativeMaximumProcessors(65535)
+    If count < 1 Then
+        Dim code As Integer = NativeLastError()
+        Throw New RuntimeException("GetMaximumProcessorCount failed (Win32 error " + Str(code) + ")", code)
+    End If
+    Return count
+End Function
+
+Private Function ReadWord(buffer As Bytes, offset As Integer) As Integer
+    Dim value As Integer = 0
+    For i As Integer = 3 To 0 Step -1
+        value = value * 256 + buffer.Item(offset + i)
+    Next
+    Return value
+End Function
+
+''' "Windows <major>.<minor> (Build <build>)" from RtlGetVersion.
+Public Function SystemInfoWindowsVersion() As String
+    ' OSVERSIONINFOW: five DWORDs and WCHAR[128] = 276 bytes.
+    Dim buffer As New Bytes(276)
+    buffer.Append(20)
+    buffer.Append(1)
+    For i As Integer = 3 To 276
+        buffer.Append(0)
+    Next
+    Dim status As Integer = NativeVersion(buffer.DataPtr())
+    If status <> 0 Then
+        Throw New RuntimeException("RtlGetVersion failed (NTSTATUS " + Str(status) + ")", status)
+    End If
+    Return "Windows " + Str(ReadWord(buffer, 4)) + "." + Str(ReadWord(buffer, 8)) + " (Build " + Str(ReadWord(buffer, 12)) + ")"
+End Function
+#End If

@@ -1,0 +1,243 @@
+#If TargetLinux Then
+Import SystemInfoLinuxBackend As SystemInfoBackend
+#ElseIf TargetWindows Then
+Import SystemInfoWindowsBackend As SystemInfoBackend
+#End If
+
+''' Frozen: True only where the original macOS NSProcessInfo backend runs.
+''' Portable code gates on SystemInfoSnapshotSupported instead.
+Public Function SystemInfoSupported() As Boolean
+    #If TargetMac Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+''' True when this compile target has a SystemInfoSnapshot backend (macOS,
+''' Linux and Windows). Compile-time only: it never probes, prompts or reads
+''' system state. Per-field availability is reported by the snapshot's Has*
+''' flags and Optional fields.
+Public Function SystemInfoSnapshotSupported() As Boolean
+    #If TargetMac Or TargetLinux Or TargetWindows Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+' Scales an unsigned native count by its unit into a signed byte count.
+' Throws OverflowException instead of wrapping past the Integer range.
+Private Function CheckedBytes(count As UInt64, unit As UInt64, label As String) As Integer
+    Dim limit As UInt64 = 9223372036854775807
+    If unit <> 0 Then
+        If count > limit \ unit Then Throw New OverflowException(label + " exceeds the signed 64-bit range")
+    End If
+    Dim product As UInt64 = count * unit
+    Dim bytes As Integer = product
+    Return bytes
+End Function
+
+#If TargetMac Then
+    Private Declare Function NativeClass Lib "objc" Alias "objc_getClass" (name As String) As Ptr
+    Private Declare Function Allocate Lib "Foundation" Selector "alloc" (cls As Ptr) As Ptr
+    Private Declare Function InitObject Lib "Foundation" Selector "init" (object As Ptr) As Ptr
+    Private Declare Function NewPool Lib "Foundation" Selector "new" (cls As Ptr) As Ptr
+    Private Declare Sub DrainPool Lib "Foundation" Selector "drain" (pool As Ptr)
+    Private Declare Sub ReleaseObject Lib "CoreFoundation" Alias "CFRelease" (value As Ptr)
+    Private Function NativeText(value As Ptr) As String
+        If value = Nil Then Return ""
+        Return CType(CType(value, CFStringRef), String)
+    End Function
+    Private Declare Function ProcessInfo Lib "Foundation" Selector "processInfo" (cls As Ptr) As Ptr
+    Private Declare Function OSVersion Lib "Foundation" Selector "operatingSystemVersionString" (info As Ptr) As Ptr
+    Private Declare Function ProcessName Lib "Foundation" Selector "processName" (info As Ptr) As Ptr
+    Private Declare Function ProcessorCount Lib "Foundation" Selector "processorCount" (info As Ptr) As Integer
+    Private Declare Function ActiveCount Lib "Foundation" Selector "activeProcessorCount" (info As Ptr) As Integer
+    Private Declare Function PhysicalMemory Lib "Foundation" Selector "physicalMemory" (info As Ptr) As Integer
+    Private Declare Function Uptime Lib "Foundation" Selector "systemUptime" (info As Ptr) As Double
+    Private Declare Function ThermalState Lib "Foundation" Selector "thermalState" (info As Ptr) As Integer
+    Private Declare Function LowPower Lib "Foundation" Selector "isLowPowerModeEnabled" (info As Ptr) As UInt8
+    Private Declare Function NativeSelector Lib "objc" Alias "sel_registerName" (name As String) As Ptr
+    Private Declare Function Responds Lib "Foundation" Selector "respondsToSelector:" (info As Ptr, action As Ptr) As UInt8
+#End If
+
+#If TargetWindows Then
+    ' Executable base name without ".exe", matching the macOS process-name form.
+    Private Function WindowsProcessName() As String
+        Dim exe As FileSystemItem = Application.Executable
+        If exe = Nil Then Return ""
+        Dim name As String = exe.Name
+        If String.Len(name) > 4 And String.LCase(String.Right(name, 4)) = ".exe" Then Return String.Left(name, String.Len(name) - 4)
+        Return name
+    End Function
+#End If
+
+
+Public Class SystemInfoSnapshot
+    Private Property mOperatingSystem As String = ""
+    Public Property OperatingSystem As String
+        Get
+            Return Me.mOperatingSystem
+        End Get
+    End Property
+    Private Property mProcessName As String = ""
+    Public Property ProcessName As String
+        Get
+            Return Me.mProcessName
+        End Get
+    End Property
+    Private Property mProcessorCount As Integer = 0
+    Public Property ProcessorCount As Integer
+        Get
+            Return Me.mProcessorCount
+        End Get
+    End Property
+    Private Property mActiveProcessors As Integer = 0
+    Public Property ActiveProcessors As Integer
+        Get
+            Return Me.mActiveProcessors
+        End Get
+    End Property
+    Private Property mMemoryBytes As Integer = 0
+    Public Property MemoryBytes As Integer
+        Get
+            Return Me.mMemoryBytes
+        End Get
+    End Property
+    Private Property mUptimeSeconds As Double = 0.0
+    Public Property UptimeSeconds As Double
+        Get
+            Return Me.mUptimeSeconds
+        End Get
+    End Property
+    Private Property mThermalState As Integer = 0
+    ''' NSProcessInfoThermalState (0 nominal … 3 critical) on macOS. -1 where
+    ''' HasThermalState is False; never a fabricated "nominal" reading.
+    Public Property ThermalState As Integer
+        Get
+            Return Me.mThermalState
+        End Get
+    End Property
+    Private Property mLowPowerMode As Boolean = False
+    ''' Meaningful only when HasLowPowerMode is True; otherwise False.
+    Public Property LowPowerMode As Boolean
+        Get
+            Return Me.mLowPowerMode
+        End Get
+    End Property
+    Private Property mHasThermalState As Boolean = False
+    ''' True on macOS; False on Linux and Windows (ThermalState = -1).
+    Public Property HasThermalState As Boolean
+        Get
+            Return Me.mHasThermalState
+        End Get
+    End Property
+    Private Property mHasLowPowerMode As Boolean = False
+    ''' True on macOS 12+ (isLowPowerModeEnabled); False on Linux and Windows.
+    Public Property HasLowPowerMode As Boolean
+        Get
+            Return Me.mHasLowPowerMode
+        End Get
+    End Property
+    Private Property mAvailableMemoryBytes As Optional Of Integer = None
+    ''' Memory available for new allocations without swapping: Linux
+    ''' /proc/meminfo MemAvailable (never sysinfo freeram), Windows
+    ''' MEMORYSTATUSEX.ullAvailPhys. None on macOS and when Linux lacks MemAvailable.
+    Public Property AvailableMemoryBytes As Optional Of Integer
+        Get
+            Return Me.mAvailableMemoryBytes
+        End Get
+    End Property
+    Private Property mSwapTotalBytes As Optional Of Integer = None
+    ''' Linux sysinfo totalswap. None on macOS and Windows (the Windows commit
+    ''' limit is not swap).
+    Public Property SwapTotalBytes As Optional Of Integer
+        Get
+            Return Me.mSwapTotalBytes
+        End Get
+    End Property
+    Private Property mSwapFreeBytes As Optional Of Integer = None
+    ''' Linux sysinfo freeswap. None on macOS and Windows.
+    Public Property SwapFreeBytes As Optional Of Integer
+        Get
+            Return Me.mSwapFreeBytes
+        End Get
+    End Property
+    Private Property mLoadAverage1Minute As Optional Of Double = None
+    ''' Linux sysinfo load averages. None on macOS and Windows.
+    Public Property LoadAverage1Minute As Optional Of Double
+        Get
+            Return Me.mLoadAverage1Minute
+        End Get
+    End Property
+    Private Property mLoadAverage5Minutes As Optional Of Double = None
+    Public Property LoadAverage5Minutes As Optional Of Double
+        Get
+            Return Me.mLoadAverage5Minutes
+        End Get
+    End Property
+    Private Property mLoadAverage15Minutes As Optional Of Double = None
+    Public Property LoadAverage15Minutes As Optional Of Double
+        Get
+            Return Me.mLoadAverage15Minutes
+        End Get
+    End Property
+    Public Sub Constructor()
+        #If TargetMac Then
+            Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+            Try
+                Dim info As Ptr = ProcessInfo(NativeClass("NSProcessInfo"))
+                Me.mOperatingSystem = NativeText(OSVersion(info))
+                Me.mProcessName = NativeText(ProcessName(info))
+                Me.mProcessorCount = ProcessorCount(info)
+                Me.mActiveProcessors = ActiveCount(info)
+                Me.mMemoryBytes = PhysicalMemory(info)
+                Me.mUptimeSeconds = Uptime(info)
+                Me.mThermalState = ThermalState(info)
+                Me.mHasThermalState = True
+                If Responds(info, NativeSelector("isLowPowerModeEnabled")) <> 0 Then
+                    Me.mLowPowerMode = LowPower(info) <> 0
+                    Me.mHasLowPowerMode = True
+                End If
+            Finally
+                DrainPool(pool)
+            End Try
+        #ElseIf TargetLinux Then
+            Dim native As SystemInfoLinuxSysinfo = SystemInfoBackend.SystemInfoLinuxReadSysinfo()
+            Dim unit As UInt64 = native.MemoryUnit
+            Me.mOperatingSystem = SystemInfoBackend.SystemInfoLinuxKernel()
+            Dim exe As FileSystemItem = Application.Executable
+            If exe <> Nil Then Me.mProcessName = exe.Name
+            Me.mProcessorCount = SystemInfoBackend.SystemInfoLinuxConfiguredProcessors()
+            Me.mActiveProcessors = SystemInfoBackend.SystemInfoLinuxOnlineProcessors()
+            Me.mMemoryBytes = CheckedBytes(native.TotalRam, unit, "Total memory")
+            Me.mUptimeSeconds = SystemInfoBackend.SystemInfoLinuxBootSeconds()
+            Me.mThermalState = -1
+            Dim availableKiB As Optional Of Integer = SystemInfoBackend.SystemInfoLinuxMemAvailableKiB()
+            If availableKiB.HasValue Then Me.mAvailableMemoryBytes = Some(CheckedBytes(availableKiB.Value, 1024, "Available memory"))
+            Me.mSwapTotalBytes = Some(CheckedBytes(native.TotalSwap, unit, "Total swap"))
+            Me.mSwapFreeBytes = Some(CheckedBytes(native.FreeSwap, unit, "Free swap"))
+            ' Explicit Double operands avoid integer division in Buoy 0.72.0.
+            Dim load1 As Double = native.Load1
+            Dim load5 As Double = native.Load5
+            Dim load15 As Double = native.Load15
+            Me.mLoadAverage1Minute = Some(load1 / 65536.0)
+            Me.mLoadAverage5Minutes = Some(load5 / 65536.0)
+            Me.mLoadAverage15Minutes = Some(load15 / 65536.0)
+        #ElseIf TargetWindows Then
+            Dim memory As SystemInfoWindowsMemoryStatus = SystemInfoBackend.SystemInfoWindowsReadMemory()
+            Me.mOperatingSystem = SystemInfoBackend.SystemInfoWindowsVersion()
+            Me.mProcessName = WindowsProcessName()
+            Me.mProcessorCount = SystemInfoBackend.SystemInfoWindowsConfiguredProcessors()
+            Me.mActiveProcessors = SystemInfoBackend.SystemInfoWindowsActiveProcessors()
+            Me.mMemoryBytes = CheckedBytes(memory.TotalPhysicalBytes, 1, "Total memory")
+            Dim milliseconds As Double = SystemInfoBackend.SystemInfoWindowsUptimeMilliseconds()
+            Me.mUptimeSeconds = milliseconds / 1000.0
+            Me.mThermalState = -1
+            Me.mAvailableMemoryBytes = Some(CheckedBytes(memory.AvailablePhysicalBytes, 1, "Available memory"))
+        #Else
+            Throw New UnsupportedOperationException("System information requires macOS")
+        #End If
+    End Sub
+End Class

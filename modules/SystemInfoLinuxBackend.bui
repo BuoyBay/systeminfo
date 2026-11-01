@@ -1,0 +1,123 @@
+' Internal Linux/glibc backend for SystemInfoSnapshot (64-bit targets).
+' Adapted from containers/integrations/linux/linuxsystem.bui (sysinfo,
+' get_nprocs*) and linuxnative.bui (CLOCK_BOOTTIME). Imported only by
+' SystemInfo.bui under #If TargetLinux; not part of the public API.
+
+#If TargetLinux Then
+' Linux LP64 ABI: sizeof(struct sysinfo) = 112, alignment = 8.
+' Flatten loads[3] into adjacent unsigned 64-bit fields.
+Sequential Structure SystemInfoLinuxSysinfo
+    Uptime As Int64
+    Load1 As UInt64
+    Load5 As UInt64
+    Load15 As UInt64
+    TotalRam As UInt64
+    FreeRam As UInt64
+    SharedRam As UInt64
+    BufferRam As UInt64
+    TotalSwap As UInt64
+    FreeSwap As UInt64
+    Processes As UInt16
+    Padding As UInt16
+    TotalHigh As UInt64
+    FreeHigh As UInt64
+    MemoryUnit As UInt32
+End Structure
+
+Sequential Structure SystemInfoLinuxTimespec
+    Seconds As Int64
+    Nanoseconds As Int64
+End Structure
+
+Private Optional Declare Function CSysinfo Lib "c" Alias "sysinfo" (ByRef value As SystemInfoLinuxSysinfo) As Int32
+Private Optional Declare Function COnlineProcessors Lib "c" Alias "get_nprocs" () As Int32
+Private Optional Declare Function CConfiguredProcessors Lib "c" Alias "get_nprocs_conf" () As Int32
+Private Optional Declare Function CClockGetTime Lib "c" Alias "clock_gettime" (clockId As Int32, ByRef value As SystemInfoLinuxTimespec) As Int32
+' struct utsname: six char[65] fields (_UTSNAME_LENGTH) = 390 bytes.
+Private Optional Declare Function CUname Lib "c" Alias "uname" (buffer As Ptr) As Int32
+
+Public Function SystemInfoLinuxReadSysinfo() As SystemInfoLinuxSysinfo
+    Dim native As SystemInfoLinuxSysinfo
+    If CSysinfo(native) <> 0 Then
+        Throw New RuntimeException("sysinfo failed")
+    End If
+    If native.MemoryUnit = 0 Then
+        Throw New RuntimeException("sysinfo returned a zero memory unit")
+    End If
+    Return native
+End Function
+
+''' Online system CPUs, not the process affinity mask or a container's CPU quota.
+Public Function SystemInfoLinuxOnlineProcessors() As Integer
+    Dim count As Integer = COnlineProcessors()
+    If count < 1 Then
+        Throw New RuntimeException("get_nprocs returned an invalid processor count")
+    End If
+    Return count
+End Function
+
+''' Configured system CPUs, including offline CPUs.
+Public Function SystemInfoLinuxConfiguredProcessors() As Integer
+    Dim count As Integer = CConfiguredProcessors()
+    If count < 1 Then
+        Throw New RuntimeException("get_nprocs_conf returned an invalid processor count")
+    End If
+    Return count
+End Function
+
+''' CLOCK_BOOTTIME: Linux uptime including suspended time.
+Public Function SystemInfoLinuxBootSeconds() As Double
+    Dim value As SystemInfoLinuxTimespec
+    If CClockGetTime(7, value) <> 0 Then
+        Throw New RuntimeException("clock_gettime(CLOCK_BOOTTIME) failed")
+    End If
+    Dim nanos As Double = value.Nanoseconds
+    Dim seconds As Double = value.Seconds
+    Return seconds + nanos / 1000000000.0
+End Function
+
+Private Function FieldText(buffer As Bytes, offset As Integer, capacity As Integer) As String
+    Dim exact As New Bytes(capacity)
+    For i As Integer = offset To offset + capacity - 1
+        If buffer.Item(i) = 0 Then Exit For
+        exact.Append(buffer.Item(i))
+    Next
+    Return exact.ToString(Text.Encodings.UTF8)
+End Function
+
+''' Kernel name and release from uname(2), e.g. "Linux 6.12.0".
+Public Function SystemInfoLinuxKernel() As String
+    Dim buffer As New Bytes(392)
+    For i As Integer = 1 To 392
+        buffer.Append(0)
+    Next
+    If CUname(buffer.DataPtr()) <> 0 Then
+        Throw New RuntimeException("uname failed")
+    End If
+    Return FieldText(buffer, 0, 65) + " " + FieldText(buffer, 130, 65)
+End Function
+
+''' MemAvailable from /proc/meminfo in KiB (Linux 3.14+). None when the
+''' kernel does not report it; sysinfo freeram is never substituted.
+Public Function SystemInfoLinuxMemAvailableKiB() As Optional Of Integer
+    ' /proc files report size 0, so stream lines instead of ReadAllText.
+    Dim opened As Result Of TextInputStream, IOError = TextInputStream.Open(New FileSystemItem("/proc/meminfo"))
+    If opened.IsErr Then Return None
+    Dim stream As TextInputStream = opened.Value
+    Try
+        While Not stream.EOF
+            Dim line As String = stream.ReadLine()
+            If String.StartsWith(line, "MemAvailable:") Then
+                Dim fields As Array Of String = String.Split(String.Trim(String.Mid(line, 14)), " ")
+                If Array.Count(fields) <> 2 Or fields(1) <> "kB" Then Return None
+                Dim parsed As Result Of Integer, String = Integer.Parse(fields(0))
+                If parsed.IsErr Or parsed.Value < 0 Then Return None
+                Return Some(parsed.Value)
+            End If
+        End While
+    Finally
+        stream.Close()
+    End Try
+    Return None
+End Function
+#End If
