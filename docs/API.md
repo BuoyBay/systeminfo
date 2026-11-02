@@ -19,6 +19,4 @@
 
 Linux and Windows backends live in internal modules `SystemInfoLinuxBackend` and `SystemInfoWindowsBackend`. Their native declarations are copied from the container interop modules (`linuxsystem`, `linuxnative`, `WinSystem`); the package imports no container code.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
 Inspired by [macoslib’s Cocoa examples](https://github.com/macoslib/macoslib); implemented independently against [Apple’s API](https://developer.apple.com/documentation/foundation/processinfo).
