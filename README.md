@@ -1,4 +1,4 @@
-# Read OS, process, CPU, memory and uptime snapshots
+# OS / process / CPU / memory / uptime snapshots
 
 `Import systeminfo`. `New SystemInfoSnapshot()` reads OS and process names, configured and active processor counts, physical memory, uptime, and, where the platform reports them, thermal state, low-power mode, available memory, swap and load averages. Properties are read-only. Nothing is changed, nothing prompts, and environment variables or credentials are not collected.
 
@@ -17,7 +17,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import systeminfo
 
 Sub Main()
