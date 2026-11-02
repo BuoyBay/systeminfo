@@ -2,7 +2,7 @@
     "schema": 1,
     "name": "systeminfo",
     "version": "0.1.0",
-    "description": "OS / process / CPU / memory / uptime snapshots",
+    "description": "OS, CPU, memory snapshots",
     "platforms": [
         "arm64-apple-macos",
         "x86_64-apple-macos",
